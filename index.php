@@ -48,15 +48,14 @@ function round_to_2_5($kg){
   $r = round($kg / 2.5) * 2.5;
   return max(2.5, $r); // nunca menos de 2.5 kg
 }
-
 function inc_2_5($kg){
-  return round_to_2_5($kg + 2.5);
+  // suma en escalón 2.5 desde el múltiplo redondeado actual
+  return round_to_2_5($kg) + 2.5;
 }
-
 function dec_2_5($kg){
-  return max(2.5, round_to_2_5($kg - 2.5));
+  // resta en escalón 2.5 desde el múltiplo redondeado actual
+  return max(2.5, round_to_2_5($kg) - 2.5);
 }
-
 
 // ====== AUTENTICACIÓN ======
 if (post('action')==='register') {
@@ -112,7 +111,7 @@ function routine_with_days($rid){
 }
 function day_detail($day_id){
   $st=pdo()->prepare("
-    SELECT d.*, r.user_id, r.name AS routine_name
+    SELECT d.*, r.user_id, r.name AS routine_name, d.routine_id
     FROM routine_days d
     JOIN routines r ON r.id=d.routine_id
     WHERE d.id=? AND r.user_id=?
@@ -185,18 +184,22 @@ if (is_logged()) {
     go(['view'=>'day','day_id'=>$day_id,'edit'=>1]);
   }
 
-  // Añadir ejercicio
+  // Añadir ejercicio (validamos day_id en PHP; insert directo)
   if ($act==='add_ex'){
     $day_id=(int)post('day_id'); $name=trim((string)post('exercise_name'));
     $series=max(1,(int)post('series')); $rmin=max(1,(int)post('reps_min')); $rmax=max($rmin,(int)post('reps_max'));
     $notes=trim((string)post('notes'));
-    $st=pdo()->prepare("
-      INSERT INTO day_exercises (day_id, exercise_name, series, reps_min, reps_max, notes, next_target_series, next_target_reps)
-      SELECT ?,?,?,?,?,?,?,?
-      WHERE EXISTS (SELECT 1 FROM routine_days d JOIN routines r ON r.id=d.routine_id WHERE d.id=? AND r.user_id=?)
-    ");
-    // de inicio, el objetivo = series y reps_min; peso objetivo nulo hasta primer log
-    $st->execute([$day_id,$name,$series,$rmin,$rmax,$notes,$series,$rmin,$day_id,uid()]);
+
+    // Verifica que el día pertenece al usuario
+    $ok=pdo()->prepare("SELECT 1
+      FROM routine_days d JOIN routines r ON r.id=d.routine_id
+      WHERE d.id=? AND r.user_id=?");
+    $ok->execute([$day_id, uid()]);
+    if(!$ok->fetch()){ $error='Día inválido.'; go(['view'=>'day','day_id'=>$day_id,'edit'=>1]); }
+
+    $st=pdo()->prepare("INSERT INTO day_exercises (day_id, exercise_name, series, reps_min, reps_max, notes, next_target_series, next_target_reps)
+                        VALUES (?,?,?,?,?,?,?,?)");
+    $st->execute([$day_id,$name,$series,$rmin,$rmax,$notes,$series,$rmin]);
     go(['view'=>'day','day_id'=>$day_id,'edit'=>1]);
   }
 
@@ -266,15 +269,14 @@ if (is_logged()) {
     $day_id = (int)post('day_id') ?: null;
     $exercise_name = trim((string)post('exercise_name'));
     $session_date = post('session_date') ? (string)post('session_date') : today();
-    $weight = round_to_2_5((float)post('weight_kg')); // fuerza múltiplo de 2.5
+    $weight = round_to_2_5((float)post('weight_kg')); // fuerza múltiplo de 2.5 (mín 2.5)
     $series = max(1,(int)post('series'));
-    $reps_str = preg_replace('/\s+/', '', $_POST['reps_per_set']);
+    $reps_str = preg_replace('/\s+/', '', (string)post('reps_per_set')); // limpiar espacios
     $rpe = post('rpe')!=='' ? max(1,min(10,(int)post('rpe'))) : null;
     $obs = trim((string)post('observations')) ?: null;
 
     $dt = DateTime::createFromFormat('Y-m-d', $session_date, new DateTimeZone('Europe/Madrid'));
-    $week_number = (int)$dt->format('oW');
-
+    $week_number = (int)$dt->format('W'); // semana ISO (num)
 
     // Insertar log
     $st=pdo()->prepare("INSERT INTO exercise_logs (user_id, routine_id, day_id, exercise_name, week_number, weight_kg, series, reps_per_set, rpe, observations, session_date)
@@ -294,7 +296,7 @@ if (is_logged()) {
     $session_date=(string)post('session_date');
     $weight=round_to_2_5((float)post('weight_kg'));
     $series=max(1,(int)post('series'));
-    $reps_str=trim((string)post('reps_per_set'));
+    $reps_str=preg_replace('/\s+/', '', (string)post('reps_per_set'));
     $rpe = post('rpe')!=='' ? max(1,min(10,(int)post('rpe'))) : null;
     $obs = trim((string)post('observations')) ?: null;
     $dt = DateTime::createFromFormat('Y-m-d', $session_date, new DateTimeZone('Europe/Madrid'));
@@ -308,7 +310,6 @@ if (is_logged()) {
     $st->execute([$session_date,$weight,$series,$reps_str,$rpe,$obs,$week_number,$log_id,uid()]);
 
     // Volver a calcular objetivo con el historial actualizado
-    // Necesitamos el nombre del ejercicio del log editado
     $sel=pdo()->prepare("SELECT exercise_name, day_id FROM exercise_logs WHERE id=? AND user_id=?");
     $sel->execute([$log_id, uid()]);
     $row=$sel->fetch();
@@ -336,7 +337,7 @@ if (is_logged()) {
   }
 }
 
-// ====== LÓGICA SOBRECARGA (automática, basada en ciencia) ======
+// ====== LÓGICA SOBRECARGA REFINADA ======
 function get_last_logs_for_ex_in_day($day_id, $exercise_name, $limit=6){
   $st=pdo()->prepare("SELECT * FROM exercise_logs WHERE user_id=? AND day_id=? AND exercise_name=? ORDER BY session_date DESC, id DESC LIMIT ?");
   $st->bindValue(1, uid(), PDO::PARAM_INT);
@@ -354,15 +355,6 @@ function get_day_exercise_row($day_id, $exercise_name){
   return $st->fetch();
 }
 
-/*
- Reglas (doble progresión + RPE + estancamiento + deload) con saltos de 2.5 kg:
- - Si completó el rango (min >= reps_min y max >= reps_max) y RPE <= 7 -> +2.5 kg, reps = reps_min, series = series base.
- - Si está dentro del rango pero no tocó el máximo y RPE <= 8 -> mantener peso, objetivo reps = reps_max.
- - Si reps bajan frente a la sesión anterior o RPE >= 9 -> deload (-2.5 kg) y reps = reps_min.
- - Si 3 sesiones sin mejora (mismo peso y sin subir promedio de reps) -> +1 serie (hasta 5).
- - Si no hay históricos -> objetivo inicial = series base, reps = reps_min, peso = (si hay last log global del ejercicio en cualquier día, úsalo; si no, null).
-*/
-// ====== LÓGICA SOBRECARGA REFINADA (científica y coherente) ======
 function compute_next_target($day_id, $e_row){
   $exercise_name = $e_row['exercise_name'];
   $series_base = (int)$e_row['series'];
@@ -374,24 +366,29 @@ function compute_next_target($day_id, $e_row){
   $next_series = $series_base;
   $next_reps   = $reps_min;
 
-  // Si no hay logs, busca el último global o establece peso base
+  // Sin logs en ese día: usa último global (mismo ejercicio por nombre) o 20 kg
   if (!$logs) {
-    $st = pdo()->prepare("UPDATE day_exercises SET next_target_weight=?, next_target_reps=?, next_target_series=? WHERE id=?");
+    $st = pdo()->prepare("SELECT weight_kg FROM exercise_logs WHERE user_id=? AND exercise_name=? ORDER BY session_date DESC, id DESC LIMIT 1");
+    $st->execute([uid(), $exercise_name]);
     $any = $st->fetch();
-    $next_weight = $any ? max(2.5, round_to_2_5((float)$any['weight_kg'])) : 20; // peso inicial por defecto 20kg
+    $next_weight = $any ? round_to_2_5((float)$any['weight_kg']) : 20.0;
+    $next_weight = min(500.0, max(2.5, $next_weight));
     return [$next_weight, $reps_min, $series_base];
   }
 
   // Última sesión
   $curr = $logs[0];
   $curr_reps = parse_reps($curr['reps_per_set']);
-  if (count($curr_reps) == 0) return [$curr['weight_kg'], $reps_min, $series_base];
+  if (count($curr_reps) == 0) {
+    $cw = round_to_2_5((float)$curr['weight_kg']);
+    return [min(500.0, max(2.5, $cw)), $reps_min, $series_base];
+  }
 
   $curr_avg = array_sum($curr_reps)/count($curr_reps);
   $curr_min = min($curr_reps);
   $curr_max = max($curr_reps);
-  $curr_rpe = $curr['rpe'] !== null ? (int)$curr['rpe'] : 7;
-  $curr_w   = max(2.5, round_to_2_5((float)$curr['weight_kg']));
+  $curr_rpe = $curr['rpe'] !== null ? (int)$curr['rpe'] : 7; // RPE neutro-optimista
+  $curr_w   = round_to_2_5((float)$curr['weight_kg']);
   $curr_s   = (int)$curr['series'];
 
   // Comparar con sesión anterior
@@ -405,28 +402,27 @@ function compute_next_target($day_id, $e_row){
     }
   }
 
-  // Detectar mejor histórico para ver si hay estancamiento real
-  $best = 0;
+  // Mejor histórico por performance (peso * reps avg)
+  $best = 0.0;
   foreach ($logs as $l) {
     $w = (float)$l['weight_kg'];
     $r = parse_reps($l['reps_per_set']);
-    $avg = count($r) ? array_sum($r)/count($r) : 0;
+    $avg = count($r) ? array_sum($r)/count($r) : 0.0;
     $perf = $w * $avg;
     if ($perf > $best) $best = $perf;
   }
 
-  // Contar sesiones sin mejorar el mejor histórico
-    $logs_rev = array_reverse($logs);
-    $streak_no_prog = 0;
-    foreach ($logs_rev as $l) {
+  // Estancamiento: desde antiguo->reciente
+  $logs_rev = array_reverse($logs);
+  $streak_no_prog = 0;
+  foreach ($logs_rev as $l) {
     $w = (float)$l['weight_kg'];
     $r = parse_reps($l['reps_per_set']);
-    $avg = count($r) ? array_sum($r)/count($r) : 0;
+    $avg = count($r) ? array_sum($r)/count($r) : 0.0;
     $perf = $w * $avg;
-    if ($perf < $best * 0.995) $streak_no_prog++;
+    if ($perf < $best * 0.99) $streak_no_prog++; // 1% margen
     else break;
-    }
-
+  }
 
   // === Reglas refinadas ===
   if ($curr_min >= $reps_min && $curr_max >= $reps_max && $curr_rpe <= 7) {
@@ -447,14 +443,16 @@ function compute_next_target($day_id, $e_row){
     $next_reps   = ($curr_max >= $reps_max) ? $reps_min : $reps_max;
   }
 
-  // Aumentar volumen si lleva 3+ sesiones sin progreso y no viene de deload
+  // Aumentar volumen si lleva 3+ sin progreso y no viene de deload fuerte
   if ($streak_no_prog >= 3 && !$reps_down && $curr_rpe <= 8) {
     $next_series = min(5, $curr_s + 1);
   }
 
-  return [max(2.5, $next_weight), $next_reps, $next_series];
-}
+  // Seguridad: límites de peso
+  $next_weight = min(500.0, max(2.5, $next_weight));
 
+  return [$next_weight, $next_reps, $next_series];
+}
 
 // Guarda el nuevo objetivo en day_exercises
 function update_next_target_for_day_exercise($day_id, $exercise_name){
@@ -463,18 +461,23 @@ function update_next_target_for_day_exercise($day_id, $exercise_name){
   list($w,$r,$s) = compute_next_target($day_id, $e);
   $st=pdo()->prepare("
     UPDATE day_exercises SET next_target_weight=?, next_target_reps=?, next_target_series=?
-    WHERE id=? LIMIT 1
+    WHERE id=?
   ");
   $st->execute([$w, $r, $s, $e['id']]);
 }
 
-// Cargar objetivos actuales (si están vacíos, calcula una vez sin guardarlos)
-function read_target_display($w, $r, $s){
-  if ($w === null) return "🎯 Próximo: —";
-  $w_disp = rtrim(rtrim(number_format($w,2,'.',''), '0'), '.');
+// Mostrar objetivo (firma corregida)
+function read_target_display($w, $r, $s, $fallback_series=null, $fallback_reps_min=null){
+  if ($w === null || $r === null || $s === null){
+    // fallback visual mínimo si no hay objetivo aún
+    if($fallback_series!==null && $fallback_reps_min!==null){
+      return "🎯 Próximo: ".(int)$fallback_series."×".(int)$fallback_reps_min." @ — kg";
+    }
+    return "🎯 Próximo: —";
+  }
+  $w_disp = rtrim(rtrim(number_format((float)$w,2,'.',''), '0'), '.');
   return "🎯 Próximo: ".(int)$s."×".(int)$r." @ ".$w_disp." kg";
 }
-
 
 // ====== VISTA (UI MINIMAL) ======
 ?>
@@ -487,13 +490,13 @@ function read_target_display($w, $r, $s){
 <style>
   :root{ --bg:#0f1114; --card:#15181d; --text:#e6e8eb; --muted:#9aa0a6; --line:#242a33; }
   *{ box-sizing:border-box; }
-    body{ 
-    margin:0; 
-    font-family: ui-rounded, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; 
-    background:var(--bg); 
-    color:var(--text); 
-    font-size:16px; /* 🔥 antes era ~14px */
-    }
+  body{
+    margin:0;
+    font-family: ui-rounded, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+    background:var(--bg);
+    color:var(--text);
+    font-size:16px; /* un pelín más grande */
+  }
   a{ color:inherit; text-decoration:none; }
   .wrap{ max-width:420px; margin:0 auto; padding:12px 10px 90px; }
   .bar{ position:sticky; top:0; z-index:10; background:rgba(15,17,20,.8); border-bottom:1px solid var(--line); backdrop-filter: blur(6px); }
@@ -515,28 +518,27 @@ function read_target_display($w, $r, $s){
   .tag{ display:inline-block; font-size:12px; color:var(--muted); border:1px dashed var(--line); padding:4px 6px; border-radius:8px; }
   summary{ cursor:pointer; font-size:12px; }
   .rowcenter{ display:flex; align-items:center; gap:6px; }
-/* === CHECK VISUAL (versión más equilibrada) === */
-.btn.check {
-  width: 30px;
-  height: 30px;
-  border-radius: 8px;
-  font-weight: 800;
-  font-size: 16px; /* más pequeño */
-  text-align: center;
-  line-height: 1;
-  transition: all 0.2s ease;
-  background: #14171b;
-  color: var(--muted);
-}
-.btn.check.checked {
-  background: #16a34a; /* verde más suave */
-  border-color: #16a34a;
-  color: #fff;
-  transform: scale(1.03);
-  box-shadow: 0 0 6px rgba(22,163,74,0.6);
-}
 
-
+  /* === CHECK VISUAL (equilibrado) === */
+  .btn.check {
+    width: 30px;
+    height: 30px;
+    border-radius: 8px;
+    font-weight: 800;
+    font-size: 16px;
+    text-align: center;
+    line-height: 1;
+    transition: all 0.2s ease;
+    background: #14171b;
+    color: var(--muted);
+  }
+  .btn.check.checked {
+    background: #16a34a; /* verde */
+    border-color: #16a34a;
+    color: #fff;
+    transform: scale(1.03);
+    box-shadow: 0 0 6px rgba(22,163,74,0.6);
+  }
 </style>
 </head>
 <body>
@@ -566,7 +568,7 @@ function read_target_display($w, $r, $s){
       </div>
       <div>
         <label>PIN</label>
-        <input name="pin" type="password" inputmode="numeric" pattern="[0-9]*" placeholder="••••" required>
+        <input name="pin" type="password" inputmode="numeric" pattern="[0-9]*" autocomplete="off" placeholder="••••" required>
       </div>
       <button class="btn" type="submit">Entrar</button>
     </form>
@@ -583,11 +585,11 @@ function read_target_display($w, $r, $s){
         </div>
         <div>
           <label>PIN</label>
-          <input name="pin" type="password" inputmode="numeric" pattern="[0-9]*" placeholder="4-8 dígitos" required>
+          <input name="pin" type="password" inputmode="numeric" pattern="[0-9]*" autocomplete="off" placeholder="4-8 dígitos" required>
         </div>
         <div>
           <label>Confirmar PIN</label>
-          <input name="pin2" type="password" inputmode="numeric" pattern="[0-9]*" required>
+          <input name="pin2" type="password" inputmode="numeric" pattern="[0-9]*" autocomplete="off" required>
         </div>
       </div>
       <button class="btn" type="submit">Registrarme</button>
@@ -704,7 +706,6 @@ function read_target_display($w, $r, $s){
                   <button class="btn check <?= $checked ? 'checked' : '' ?>" type="submit">
                     <?= $checked ? '✔' : '□' ?>
                   </button>
-
                 </form>
                 <div style="flex:1; font-size:14px; font-weight:800"><?=esc($e['exercise_name'])?></div>
               </div>
@@ -714,7 +715,15 @@ function read_target_display($w, $r, $s){
 
               <!-- Objetivo (solo texto compacto) -->
               <div style="margin-top:6px; font-size:13px; font-weight:800;">
-                <?=esc(read_target_display($e, $d['id']))?>
+                <?php
+                  echo esc(read_target_display(
+                    $e['next_target_weight'],
+                    $e['next_target_reps'],
+                    $e['next_target_series'],
+                    $e['series'],
+                    $e['reps_min']
+                  ));
+                ?>
               </div>
 
               <!-- Anotar sesión (plegable, minimal) -->
@@ -730,7 +739,7 @@ function read_target_display($w, $r, $s){
                   <div class="row">
                     <div>
                       <label>Peso (kg)</label>
-                      <input name="weight_kg" type="number" step="2.5" min="0" value="<?= $e['next_target_weight']!==null? esc($e['next_target_weight']) : '0' ?>" required>
+                      <input name="weight_kg" type="number" step="2.5" min="2.5" value="<?= $e['next_target_weight']!==null? esc($e['next_target_weight']) : '20' ?>" required>
                     </div>
                     <div>
                       <label>Series</label>
@@ -738,7 +747,7 @@ function read_target_display($w, $r, $s){
                     </div>
                   </div>
                   <label>Reps por serie</label>
-                  <input name="reps_per_set" placeholder="10, 9, 8" value="<?= $e['next_target_reps']!==null? (int)$e['next_target_reps'] : (int)$e['reps_min'] ?>" required>
+                  <input name="reps_per_set" placeholder="10,9,8" value="<?= $e['next_target_reps']!==null? (int)$e['next_target_reps'] : (int)$e['reps_min'] ?>" required>
                   <div class="row">
                     <div>
                       <label>RPE (1-10, opcional)</label>
@@ -774,7 +783,7 @@ function read_target_display($w, $r, $s){
                         <div class="row">
                           <div>
                             <label>Peso (kg)</label>
-                            <input name="weight_kg" type="number" step="2.5" min="0" value="<?=esc($log['weight_kg'])?>" required>
+                            <input name="weight_kg" type="number" step="2.5" min="2.5" value="<?=esc($log['weight_kg'])?>" required>
                           </div>
                           <div>
                             <label>Series</label>
