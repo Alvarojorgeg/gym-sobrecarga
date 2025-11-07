@@ -83,12 +83,3 @@ Gym Coach usa un sistema inteligente que analiza tus últimas 6 sesiones por eje
    - 🎯 Ver tu siguiente objetivo calculado automáticamente.
 
 ---
-
-## 🧩 Base de datos mínima (MySQL)
-
-```sql
-CREATE DATABASE gymcoach;
-USE gymcoach;
-
--- Crea tus tablas (users, routines, routine_days, day_exercises, exercise_logs, exercise_checks)
--- Puedes copiarlas fácilmente desde el código PHP.
