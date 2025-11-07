@@ -33,6 +33,8 @@ const DB_HOST = 'tu_host';
 const DB_NAME = 'tu_base_de_datos';
 const DB_USER = 'tu_usuario';
 const DB_PASS = 'tu_contraseña';
+```
+
 ## 🚀 ¿Qué hace este programa?
 
 Gym Coach es una **app web en PHP + MySQL** (solo un archivo `index.php`) que:
